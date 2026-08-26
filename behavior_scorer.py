@@ -7,7 +7,8 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QTableWidget, QTableWidgetItem, QFileDialog,
-    QLabel, QLineEdit, QComboBox, QDialog, QFormLayout, QAbstractItemView, QMessageBox
+    QLabel, QLineEdit, QComboBox, QDialog, QFormLayout, QAbstractItemView, QMessageBox,
+    QSlider
 )
 from PyQt6.QtGui import QImage, QPixmap, QKeyEvent
 
@@ -107,6 +108,7 @@ class BehaviorScorer(QMainWindow):
         self.video_duration = 0.0
         self.is_playing = False
         self.video_path = ""
+        self._was_playing_before_scrub = False
 
         self.ethogram = {}       
         self.active_states = {}  
@@ -159,6 +161,28 @@ class BehaviorScorer(QMainWindow):
         self.timeline_label = QLabel("Frame: 0/0  |  Time: 0.000 / 0.000 s")
         content_layout.addWidget(self.timeline_label)
 
+        # Video player controls: play/pause + frame-accurate scrub bar
+        player_controls_layout = QHBoxLayout()
+
+        self.play_pause_btn = QPushButton("Play")
+        self.play_pause_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.play_pause_btn.setEnabled(False)
+        self.play_pause_btn.clicked.connect(self.toggle_play_pause)
+        player_controls_layout.addWidget(self.play_pause_btn)
+
+        self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.seek_slider.setRange(0, 0)
+        self.seek_slider.setEnabled(False)
+        # sliderMoved only fires on user drag, never on programmatic setValue(),
+        # so scrubbing can't create a feedback loop with update_video_frame().
+        self.seek_slider.sliderPressed.connect(self.on_seek_pressed)
+        self.seek_slider.sliderMoved.connect(self.on_seek_moved)
+        self.seek_slider.sliderReleased.connect(self.on_seek_released)
+        player_controls_layout.addWidget(self.seek_slider)
+
+        content_layout.addLayout(player_controls_layout)
+
         media_btn_layout = QHBoxLayout()
         open_video_btn = QPushButton("Open Video File")
         open_video_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -176,23 +200,24 @@ class BehaviorScorer(QMainWindow):
             "Time", "Image index", "Image file path", "Comment"
         ]
         self.log_table.setHorizontalHeaderLabels(self.johan_headers)
+        self.log_table.itemSelectionChanged.connect(self.on_log_row_selected)
         content_layout.addWidget(self.log_table)
 
         table_ops_layout = QHBoxLayout()
-        add_row_btn = QPushButton("Add Manual Row")
-        add_row_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        add_row_btn.clicked.connect(self.add_manual_row)
-        
         del_row_btn = QPushButton("Delete Selected Row")
         del_row_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         del_row_btn.clicked.connect(self.delete_selected_row)
         
+        load_log_btn = QPushButton("Load Log")
+        load_log_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        load_log_btn.clicked.connect(self.load_log_tsv)
+
         export_tsv_btn = QPushButton("Export Log")
         export_tsv_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         export_tsv_btn.clicked.connect(self.export_to_tsv)
         
-        table_ops_layout.addWidget(add_row_btn)
         table_ops_layout.addWidget(del_row_btn)
+        table_ops_layout.addWidget(load_log_btn)
         table_ops_layout.addWidget(export_tsv_btn)
         content_layout.addLayout(table_ops_layout)
 
@@ -281,6 +306,12 @@ class BehaviorScorer(QMainWindow):
             self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.video_duration = self.total_frames / self.fps
             self.current_frame = 0
+
+            self.seek_slider.setEnabled(True)
+            self.seek_slider.setRange(0, max(self.total_frames - 1, 0))
+            self.play_pause_btn.setEnabled(True)
+            self.play_pause_btn.setText("Play")
+
             self.update_video_frame()
         self.centralWidget().setFocus()
 
@@ -303,6 +334,15 @@ class BehaviorScorer(QMainWindow):
                     f"Time: {current_time:.3f} / {self.video_duration:.3f} s"
                 )
 
+                # Keep the scrub bar exactly matched to the current frame.
+                # blockSignals prevents this programmatic move from being
+                # mistaken for a user drag.
+                self.seek_slider.blockSignals(True)
+                self.seek_slider.setValue(self.current_frame)
+                self.seek_slider.blockSignals(False)
+
+                self.highlight_current_row()
+
     def next_frame(self):
         if self.current_frame < self.total_frames - 1:
             self.current_frame += 1
@@ -310,17 +350,50 @@ class BehaviorScorer(QMainWindow):
         else:
             self.timer.stop()
             self.is_playing = False
+            self.play_pause_btn.setText("Play")
+
+    def toggle_play_pause(self):
+        if not self.cap or self.total_frames == 0:
+            return
+
+        if self.is_playing:
+            self.timer.stop()
+            self.is_playing = False
+            self.play_pause_btn.setText("Play")
+        else:
+            self.timer.start(int(1000 / self.fps))
+            self.is_playing = True
+            self.play_pause_btn.setText("Pause")
+
+        self.centralWidget().setFocus()
+
+    def on_seek_pressed(self):
+        # Pause while the user is actively scrubbing, and remember whether
+        # to resume playback once they let go.
+        self._was_playing_before_scrub = self.is_playing
+        if self.is_playing:
+            self.timer.stop()
+            self.is_playing = False
+            self.play_pause_btn.setText("Play")
+
+    def on_seek_moved(self, value):
+        self.current_frame = value
+        self.update_video_frame()
+
+    def on_seek_released(self):
+        self.current_frame = self.seek_slider.value()
+        self.update_video_frame()
+        if self._was_playing_before_scrub:
+            self.timer.start(int(1000 / self.fps))
+            self.is_playing = True
+            self.play_pause_btn.setText("Pause")
+        self.centralWidget().setFocus()
 
     def keyPressEvent(self, event: QKeyEvent):
         v_key = event.key()
         
         if v_key == Qt.Key.Key_Space:
-            if self.is_playing:
-                self.timer.stop()
-                self.is_playing = False
-            else:
-                self.timer.start(int(1000 / self.fps))
-                self.is_playing = True
+            self.toggle_play_pause()
             return
             
         elif v_key == Qt.Key.Key_Left:
@@ -355,10 +428,85 @@ class BehaviorScorer(QMainWindow):
                     self.append_log_row(b_name, "START", current_time, b_desc)
                     self.active_states[b_name] = current_time
 
-    def append_log_row(self, behavior_name, type_flag, event_time, description=""):
-        row = self.log_table.rowCount()
-        self.log_table.insertRow(row)
+    def _insert_row_for_time(self, event_time):
+        time_col = self.johan_headers.index("Time")
+        insert_idx = self.log_table.rowCount()
+        for r in range(self.log_table.rowCount()):
+            item = self.log_table.item(r, time_col)
+            if item:
+                try:
+                    t = float(item.text())
+                except ValueError:
+                    continue
+                if t > event_time:
+                    insert_idx = r
+                    break
+        self.log_table.insertRow(insert_idx)
+        return insert_idx
 
+    def highlight_current_row(self):
+        time_col = self.johan_headers.index("Time")
+        current_time = self.current_frame / self.fps
+        closest_row = -1
+        closest_diff = None
+        for r in range(self.log_table.rowCount()):
+            item = self.log_table.item(r, time_col)
+            if item:
+                try:
+                    t = float(item.text())
+                except ValueError:
+                    continue
+                diff = abs(t - current_time)
+                if closest_diff is None or diff < closest_diff:
+                    closest_diff = diff
+                    closest_row = r
+        if closest_row >= 0:
+            # Block signals so this video-driven selection doesn't loop back
+            # through on_log_row_selected (which drives the video from the
+            # table selection, in the opposite direction).
+            self.log_table.blockSignals(True)
+            self.log_table.selectRow(closest_row)
+            self.log_table.blockSignals(False)
+            item = self.log_table.item(closest_row, 0)
+            if item:
+                self.log_table.scrollToItem(item)
+
+    def on_log_row_selected(self):
+        if not self.cap or self.total_frames == 0:
+            return
+
+        row = self.log_table.currentRow()
+        if row < 0:
+            return
+
+        time_col = self.johan_headers.index("Time")
+        item = self.log_table.item(row, time_col)
+        if not item or not item.text():
+            return
+
+        try:
+            event_time = float(item.text())
+        except ValueError:
+            return
+
+        frame = int(round(event_time * self.fps))
+        frame = max(0, min(frame, self.total_frames - 1))
+        if frame == self.current_frame:
+            return
+
+        # Selecting a row while the video is playing would just get
+        # overwritten by the next tick, so pause first to make the jump feel
+        # deliberate (mirrors the scrub-bar behavior).
+        if self.is_playing:
+            self.timer.stop()
+            self.is_playing = False
+            self.play_pause_btn.setText("Play")
+
+        self.current_frame = frame
+        self.update_video_frame()
+
+    def append_log_row(self, behavior_name, type_flag, event_time, description=""):
+        row = self._insert_row_for_time(event_time)
         obs_id = os.path.basename(self.video_path) if self.video_path else "top.mp4"
         
         fields = {
@@ -379,15 +527,6 @@ class BehaviorScorer(QMainWindow):
         for col_name, val in fields.items():
             col_idx = self.johan_headers.index(col_name)
             self.log_table.setItem(row, col_idx, QTableWidgetItem(val))
-
-    def add_manual_row(self):
-        row = self.log_table.rowCount()
-        self.log_table.insertRow(row)
-        current_time = self.current_frame / self.fps
-        
-        self.log_table.setItem(row, self.johan_headers.index("Observation id"), QTableWidgetItem("top.mp4"))
-        self.log_table.setItem(row, self.johan_headers.index("Behavior type"), QTableWidgetItem("START"))
-        self.log_table.setItem(row, self.johan_headers.index("Time"), QTableWidgetItem(f"{current_time:.3f}"))
 
     def delete_selected_row(self):
         selected = self.log_table.currentRow()
@@ -433,6 +572,65 @@ class BehaviorScorer(QMainWindow):
 
         temp_cap.release()
         QMessageBox.information(self, "Analysis Complete", "Motion pre-scoring completed.")
+        self.centralWidget().setFocus()
+
+    def load_log_tsv(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Event Log", "", "TSV Files (*.tsv);;CSV Files (*.csv);;All Files (*)")
+        if not path:
+            return
+        delimiter = "\t" if path.endswith('.tsv') else ","
+        try:
+            with open(path, newline='') as f:
+                reader = csv.reader(f, delimiter=delimiter)
+                header = next(reader, None)
+                rows = list(reader)
+        except Exception as e:
+            QMessageBox.warning(self, "Load Failed", f"Could not read file:\n{e}")
+            return
+
+        # Handle known header quirks from BORIS-style exports:
+        # - "SubjectBehavior" is a merged column (Subject + Behavior with no separator);
+        #   its value is treated as the Behavior, and Subject is left blank.
+        # - "Source" and "Media file name" don't exist in this tool's format and are ignored.
+        header_aliases = {"SubjectBehavior": "Behavior"}
+        ignored_headers = {"Source", "Media file name"}
+
+        col_map = []  # list of (dest_col_index or None) per source column, in source order
+        unmatched = []
+        if header:
+            for h in header:
+                h_clean = h.strip()
+                if h_clean in ignored_headers:
+                    col_map.append(None)
+                elif h_clean in header_aliases:
+                    col_map.append(self.johan_headers.index(header_aliases[h_clean]))
+                elif h_clean in self.johan_headers:
+                    col_map.append(self.johan_headers.index(h_clean))
+                else:
+                    col_map.append(None)
+                    unmatched.append(h_clean)
+        else:
+            col_map = list(range(len(self.johan_headers)))
+
+        if unmatched:
+            QMessageBox.information(
+                self, "Load Log",
+                "Note: the following columns in the file were not recognized and were skipped:\n"
+                + ", ".join(unmatched)
+            )
+
+        for row_data in rows:
+            row = self.log_table.rowCount()
+            self.log_table.insertRow(row)
+            for src_idx, val in enumerate(row_data):
+                if src_idx >= len(col_map):
+                    break
+                dest_col = col_map[src_idx]
+                if dest_col is None:
+                    continue
+                self.log_table.setItem(row, dest_col, QTableWidgetItem(val))
+
+        QMessageBox.information(self, "Load Successful", f"Loaded {len(rows)} record(s).")
         self.centralWidget().setFocus()
 
     def export_to_tsv(self):
