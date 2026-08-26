@@ -1,0 +1,28 @@
+@echo off
+REM Sets up an isolated Python environment for the behavior scorer and launches it.
+REM Usage: double-click this file, or run it from Command Prompt.
+REM Re-running this later just launches the app (setup is skipped if already done).
+
+cd /d "%~dp0"
+
+where python >nul 2>nul
+if errorlevel 1 (
+    echo Python is not installed or not on PATH. Install it from https://www.python.org/downloads/
+    echo IMPORTANT: check "Add Python to PATH" during install, then re-run this script.
+    pause
+    exit /b 1
+)
+
+if not exist ".venv" (
+    echo Setting up environment (first run only)...
+    python -m venv .venv
+    call .venv\Scripts\activate.bat
+    python -m pip install --upgrade pip
+    pip install PyQt6 opencv-python
+) else (
+    call .venv\Scripts\activate.bat
+)
+
+echo Launching behavior scorer...
+python behavior_scorer.py
+pause
