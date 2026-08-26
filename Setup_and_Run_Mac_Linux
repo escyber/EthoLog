@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Sets up an isolated Python environment for the behavior scorer and launches it.
+# Usage: ./setup_and_run.sh
+# Re-running this script later just launches the app (setup is skipped if already done).
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+VENV_DIR=".venv"
+
+if ! command -v python3 &> /dev/null; then
+    echo "Python 3 is not installed. Install it from https://www.python.org/downloads/ and re-run this script."
+    exit 1
+fi
+
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Setting up environment (first run only)..."
+    python3 -m venv "$VENV_DIR"
+    source "$VENV_DIR/bin/activate"
+    pip install --upgrade pip
+    pip install PyQt6 opencv-python
+else
+    source "$VENV_DIR/bin/activate"
+fi
+
+echo "Launching behavior scorer..."
+python behavior_scorer.py
