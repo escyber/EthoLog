@@ -26,4 +26,4 @@ else
 fi
 
 echo "Launching behavior scorer..."
-python behavior_scorer.py
+python etholog.py
