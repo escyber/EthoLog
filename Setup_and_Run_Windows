@@ -24,5 +24,5 @@ if not exist ".venv" (
 )
 
 echo Launching behavior scorer...
-python behavior_scorer.py
+python etholog.py
 pause
